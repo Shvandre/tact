@@ -105,7 +105,10 @@ export function throwInternalCompilerError(
 }
 
 export function throwUnreachable(value: never, source?: SrcInfo) {
-    throwInternalCompilerError(`Reached impossible case: ${String(value)}`, source);
+    throwInternalCompilerError(
+        `Reached impossible case: ${String(value)}`,
+        source,
+    );
 }
 
 export function throwConstEvalError(
