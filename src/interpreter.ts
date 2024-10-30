@@ -73,6 +73,7 @@ import {
 } from "./types/types";
 import { sha256_sync } from "@ton/crypto";
 import { enabledMasterchain } from "./config/features";
+import { match } from "./utils/tricks";
 
 // TVM integers are signed 257-bit integers
 const minTvmInt: bigint = -(2n ** 256n);
@@ -765,36 +766,28 @@ export class Interpreter {
         );
     }
 
-    public interpretExpression(ast: AstExpression): Value {
-        switch (ast.kind) {
-            case "id":
-                return this.interpretName(ast);
-            case "method_call":
-                return this.interpretMethodCall(ast);
-            case "init_of":
-                return this.interpretInitOf(ast);
-            case "null":
-                return this.interpretNull(ast);
-            case "boolean":
-                return this.interpretBoolean(ast);
-            case "number":
-                return this.interpretNumber(ast);
-            case "string":
-                return this.interpretString(ast);
-            case "op_unary":
-                return this.interpretUnaryOp(ast);
-            case "op_binary":
-                return this.interpretBinaryOp(ast);
-            case "conditional":
-                return this.interpretConditional(ast);
-            case "struct_instance":
-                return this.interpretStructInstance(ast);
-            case "field_access":
-                return this.interpretFieldAccess(ast);
-            case "static_call":
-                return this.interpretStaticCall(ast);
-        }
-    }
+    public interpretExpression = (ast: AstExpression): Value =>
+        match(ast)
+            .on({ kind: "id" })((ast) => this.interpretName(ast))
+            .on({ kind: "method_call" })((ast) => this.interpretMethodCall(ast))
+            .on({ kind: "init_of" })((ast) => this.interpretInitOf(ast))
+            .on({ kind: "null" })((ast) => this.interpretNull(ast))
+            .on({ kind: "boolean" })((ast) => this.interpretBoolean(ast))
+            .on({ kind: "number" })((ast) => this.interpretNumber(ast))
+            .on({ kind: "string" })((ast) => this.interpretString(ast))
+            .on({ kind: "op_unary" })((ast) => this.interpretUnaryOp(ast))
+            .on({ kind: "op_binary" })((ast) => this.interpretBinaryOp(ast))
+            .on({ kind: "conditional" })((ast) =>
+                this.interpretConditional(ast),
+            )
+            .on({ kind: "struct_instance" })((ast) =>
+                this.interpretStructInstance(ast),
+            )
+            .on({ kind: "field_access" })((ast) =>
+                this.interpretFieldAccess(ast),
+            )
+            .on({ kind: "static_call" })((ast) => this.interpretStaticCall(ast))
+            .end();
 
     public interpretName(ast: AstId): Value {
         if (hasStaticConstant(this.context, idText(ast))) {

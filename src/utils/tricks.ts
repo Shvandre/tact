@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { throwInternalCompilerError } from "../errors";
 
 /**
@@ -44,19 +45,103 @@ type Handlers<I, O> = Unwrap<Intersect<Inputs<I>>> & Outputs<O>;
  */
 export const makeVisitor =
     <I>() =>
-    <O>(handlers: Handlers<I, O>) => {
-        return (input: Extract<I, { kind: string }>): O[keyof O] => {
-            const handler = (
-                handlers as Record<string, (input: I) => O[keyof O]>
-            )[input.kind];
+    <O>(handlers: Handlers<I, O>) =>
+    (input: Extract<I, { kind: string }>): O[keyof O] => {
+        const handler = (handlers as Record<string, (input: I) => O[keyof O]>)[
+            input.kind
+        ];
 
-            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-            if (handler) {
-                return handler(input);
-            } else {
-                throwInternalCompilerError(
-                    `Reached impossible case: ${input.kind}`,
-                );
-            }
-        };
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (handler) {
+            return handler(input);
+        } else {
+            throwInternalCompilerError(
+                `Reached impossible case: ${input.kind}`,
+            );
+        }
     };
+
+type Extend<T extends any[], H> = H extends infer A ? [...T, A] : never;
+type Flat<TS extends any[], R extends any[] = []> = TS extends [
+    infer H,
+    ...infer T,
+]
+    ? Flat<T, Extend<R, H>>
+    : R;
+
+declare const NoSuchCase: unique symbol;
+interface NoSuchCaseBug<L> extends Array<never> {
+    [NoSuchCase]: L;
+}
+type On<V, I extends any[], O> = {
+    on: <const DI extends any[]>(
+        ...key: I extends Flat<DI> ? DI : NoSuchCaseBug<DI>
+    ) => <const DO>(
+        handler: (...args: Extract<I, Flat<DI>>) => DO,
+    ) => MV<V, Exclude<I, Flat<DI>>, O | DO>;
+};
+
+declare const CasesAreNotExhaustive: unique symbol;
+interface NonExhaustiveBug<L> {
+    [CasesAreNotExhaustive]: L;
+}
+type End<I, O> = [I] extends [never]
+    ? EndInternal<O>
+    : {
+          end: NonExhaustiveBug<I>;
+      };
+type MV<V, I extends any[], O> = End<I, O> & On<V, I, O>;
+
+type OnInternal<V, I extends any[], O> = {
+    on: <const DI extends any[]>(
+        ...key: DI
+    ) => <const DO>(
+        handler: (...args: Extract<I, Flat<DI>>) => DO,
+    ) => MVInternal<V, Exclude<I, Flat<DI>>, O | DO>;
+};
+type EndInternal<O> = {
+    end: () => O;
+};
+type MVInternal<V, I extends any[], O> = EndInternal<O> & OnInternal<V, I, O>;
+
+const deepMatch = (a: unknown, b: unknown): boolean => {
+    if (
+        a === b &&
+        ["number", "string", "boolean", "bigint"].includes(typeof a) &&
+        typeof a === typeof b
+    ) {
+        return true;
+    }
+    if (a === null || b === null) {
+        return a === b;
+    }
+    if (typeof a === "object" && typeof b === "object") {
+        if (Array.isArray(a) && Array.isArray(b) && a.length === b.length) {
+            return a.every((a, i) => deepMatch(a, b[i]));
+        } else {
+            return Object.entries(b).every(([k, b]) =>
+                deepMatch(k in a ? (a as any)[k] : undefined, b),
+            );
+        }
+    }
+    return false;
+};
+
+export const match = <I extends any[]>(...args: I): MV<I, Flat<I>, never> => {
+    const rec = <V, I extends any[], O>(end: () => O): MVInternal<V, I, O> => ({
+        end,
+        on:
+            <const DI extends any[]>(...match: DI) =>
+            <const DO>(handler: (...args: Extract<I, Flat<DI>>) => DO) =>
+                rec<V, Exclude<I, Flat<DI>>, O | DO>(() =>
+                    deepMatch(args, match)
+                        ? handler(
+                              ...(args as unknown as Extract<I, Flat<DI, []>>),
+                          )
+                        : end(),
+                ),
+    });
+    return rec<I, Flat<I>, never>(() => {
+        throw new Error("Not exhaustive");
+    }) as MV<I, Flat<I>, never>;
+};
