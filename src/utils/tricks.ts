@@ -3,6 +3,7 @@ import { throwInternalCompilerError } from "../errors";
 
 /**
  * Convert union to intersection. See https://stackoverflow.com/q/50374908
+ * @knipignore
  */
 export type Intersect<T> = (T extends unknown ? (x: T) => 0 : never) extends (
     x: infer R,
@@ -13,11 +14,13 @@ export type Intersect<T> = (T extends unknown ? (x: T) => 0 : never) extends (
 /**
  * Makes types more readable
  * Example: Unwrap<{ a: 1 } & { b: 2 }> = { a: 1, b: 2 }
+ * @knipignore
  */
 export type Unwrap<T> = T extends infer R ? { [K in keyof R]: R[K] } : never;
 
 /**
  * Make visitor for literal union
+ * @knipignore
  */
 export const makeLiteralVisitor =
     <I, O>(handlers: { [K in keyof I]: () => O }) =>
@@ -42,6 +45,7 @@ type Handlers<I, O> = Unwrap<Intersect<Inputs<I>>> & Outputs<O>;
 
 /**
  * Make visitor for disjoint union (tagged union, discriminated union)
+ * @knipignore
  */
 export const makeVisitor =
     <I>() =>
@@ -127,7 +131,9 @@ const deepMatch = (a: unknown, b: unknown): boolean => {
     return false;
 };
 
-export const match = <I extends any[]>(...args: I): MV<I, Flat<I>, never> => {
+export const match = <const I extends any[]>(
+    ...args: I
+): MV<I, Flat<I>, never> => {
     const rec = <V, I extends any[], O>(end: () => O): MVInternal<V, I, O> => ({
         end,
         on:
