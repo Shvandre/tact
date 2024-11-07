@@ -1,4 +1,5 @@
 import * as A from "./grammar/ast";
+import { groupBy, intercalate, isUndefined } from "./utils/array";
 import { makeVisitor } from "./utils/tricks";
 
 //
@@ -125,185 +126,177 @@ export const ppAstExpression = (expr: A.AstExpression, parentPrecedence: number 
     return needParens ? `(${result})` : result;
 }
 
-type Ctx = {
-    row: (s: string) => string;
-    tab: <T>(cb: () => T) => T;
+type Ctx<U> = {
+    /**
+     * Empty line of code
+     */
+    empty: U;
+
+    /**
+     * Line of code with \n implied
+     */
+    row: (s: string) => U;
+    
+    /**
+     * Stacks lines after each other
+     */
+    block: (rows: readonly U[]) => U;
+
+    /**
+     * Similar to `block`, but adjacent lines of groups get concatenated
+     * [a, b] + [c, d] = [a, bc, d]
+     */
+    concat: (rows: readonly U[]) => U;
+
+    /**
+     * Same as `indent`, but indents `rows` 1 level deeper and adds `{` and `}`
+     */
+    braced: (rows: readonly U[]) => U;
 }
 
-/**
- * @param level Initial level of indentation.
- * @param spaces Number of spaces per indentation level.
- */
-const createContext = (level: number = 0, spaces: number = 4): Ctx => ({
-    row: (s) => " ".repeat(level * spaces) + s,
-    tab: (cb) => {
-        try {
-            ++level;
-            return cb();
-        } finally {
-            --level;
+type LevelFn = (level: number) => string;
+
+const createContext = (spaces: number): Ctx<readonly LevelFn[]> => {
+    const empty = Object.freeze(new Array<LevelFn>());
+    const row = (s: string) => [(level: number) => " ".repeat(level * spaces) + s];
+    const concat = (rows: readonly (readonly LevelFn[])[]): readonly LevelFn[] => {
+        const [head, ...tail] = rows;
+        if (isUndefined(head)) {
+            return [];
         }
-    },
-});
-        
-type Printer<T> = (item: T) => (ctx: Ctx) => string;
+        const next = concat(tail);
+        const init = [...head];
+        const last = init.pop();
+        if (isUndefined(last)) {
+            return next;
+        }
+        const [nextHead, ...nextTail] = next;
+        if (isUndefined(nextHead)) {
+            return head;
+        }
+        return [...init, (level) => last(level) + nextHead(level), ...nextTail];
+    };
+    const block = (rows: readonly (readonly LevelFn[])[]) => rows.flat();
+    const indent = (rows: readonly (readonly LevelFn[])[]) => block(rows).map((f) => (level: number) => f(level + 1));
+    const braced = (rows: readonly (readonly LevelFn[])[]) => block([row(`{`), indent(rows), row(`}`)]);
+    return { empty, row, concat, block, braced };
+};
+
+type Printer<T> = (item: T) => <U>(ctx: Ctx<U>) => U;
 
 type Functional = A.AstFunctionDef | A.AstAsmFunctionDef | A.AstFunctionDecl;
 
 export const ppAstModule: Printer<A.AstModule> = ({ imports, items }) => (ctx) => {
-    const importsFormatted =
-        imports.length > 0
-            ? `${imports
-                    .map((entry) => ppAstImport(entry))
-                    .join("\n")}\n\n`
-            : "";
-    const entriesFormatted = items
-        .map((entry, index, array) => {
-            const formattedEntry = ppModuleItem(entry)(ctx);
-            const nextEntry = array[index + 1];
-            if (
-                entry.kind === "constant_def" &&
-                // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-                nextEntry?.kind === "constant_def"
-            ) {
-                return formattedEntry;
-            }
-            return formattedEntry + "\n";
-        })
-        .join("\n");
-    return `${importsFormatted}${entriesFormatted.trim()}`;
+    const importsCode = imports.length > 0 ? [
+        ...imports.map((entry) => ppAstImport(entry)(ctx)),
+        ctx.empty,
+    ] : [];
+    const entriesCode = intercalate(
+        groupBy(items, ({ kind }) => kind === "constant_def" ? 1 : NaN)
+            .map((group) => group.map((node) => ppModuleItem(node)(ctx))),
+        ctx.empty,
+    );
+    return ctx.block([...importsCode, ...entriesCode]);
 }
 
-export const ppAstStruct: Printer<A.AstStructDecl> = ({ name, fields }) => ({ row, tab }) => {
-    const start = row(`struct ${ppAstId(name)} {\n`);
-    const fieldsFormatted = tab(() => {
-        return fields.map((field) => ppAstFieldDecl(field)).join("\n");
-    });
-    const end = `}`; // row(`}`); // BUG?
-    return `${start}${fieldsFormatted}\n${end}`;
+export const ppAstStruct: Printer<A.AstStructDecl> = ({ name, fields }) => (ctx) => {
+    // BUG with }
+    return ctx.concat([
+        ctx.row(`struct ${ppAstId(name)} `),
+        ctx.braced(fields.map((field) => ppAstFieldDecl(field)(ctx))),
+    ]);
 }
 
 export const ppAstContract: Printer<A.AstContract> = ({ name, traits, declarations, attributes }) => (ctx) => {
+    const attrsRaw = attributes
+        .map(({ name: { value } }) => `@interface("${value}")`)
+        .join(" ");
+    const attrsFormatted = attrsRaw ? `${attrsRaw} ` : "";
     const traitsFormatted = traits
         .map((trait) => trait.text)
         .join(", ");
-    const attrsRaw = attributes
-        .map((attr) => `@interface("${attr.name.value}")`)
-        .join(" ");
-    const attrsFormatted = attrsRaw ? `${attrsRaw} ` : "";
     const header = traitsFormatted
         ? `contract ${ppAstId(name)} with ${traitsFormatted}`
         : `contract ${ppAstId(name)}`;
-    const start = ctx.row(`${attrsFormatted}${header} {\n`);
-    const bodyFormatted = ctx.tab(() => {
-        return declarations
-            .map((dec, index, array) => {
-                const formattedDec = ppContractBody(dec)(ctx);
-                const nextDec = array[index + 1];
-                if (
-                    (dec.kind === "constant_def" &&
-                        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-                        nextDec?.kind === "constant_def") ||
-                    (dec.kind === "field_decl" &&
-                        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-                        nextDec?.kind === "field_decl")
-                ) {
-                    return formattedDec;
-                }
-                return formattedDec + "\n";
-            })
-            .join("\n");
-    })
-    const end = ctx.row(`}`);
-    return `${start}${bodyFormatted}${end}`;
+    return ctx.concat([
+        ctx.row(`${attrsFormatted}${header} `),
+        ctx.braced(intercalate(
+            groupBy(declarations, ({ kind }) => kind === "constant_def" ? 1 : kind === "field_decl" ? 2 : NaN)
+                .map((group) => group.map((node) => ppContractBody(node)(ctx))),
+            ctx.empty,
+        )),
+    ]);
 }
 
 export const ppAstPrimitiveTypeDecl: Printer<A.AstPrimitiveTypeDecl> = ({ name }) => ({ row }) => row(`primitive ${ppAstId(name)};`);
 
 export const ppAstFunctionDef: Printer<A.AstFunctionDef> = (node) => (ctx) => {
-    const signature = ctx.row(ppAstFunctionSignature(node));
-    const body = ppStatementBlock(node.statements)(ctx);
-    return `${signature} ${body}`;
+    return ctx.concat([
+        ctx.row(ppAstFunctionSignature(node)),
+        ppStatementBlock(node.statements)(ctx)
+    ]);
 }
 
-export const ppAsmShuffle = (shuffle: A.AstAsmShuffle): string => {
-    const ppArgShuffle = shuffle.args.map((id) => A.idText(id)).join(" ");
-    const ppRetShuffle =
-        shuffle.ret.length === 0
-            ? ""
-            : ` -> ${shuffle.ret.map((num) => num.value.toString()).join(" ")}`;
-    return shuffle.args.length === 0 && shuffle.ret.length === 0
-        ? ""
-        : `(${ppArgShuffle}${ppRetShuffle})`;
+export const ppAsmShuffle = ({ args, ret }: A.AstAsmShuffle): string => {
+    if (args.length === 0 && ret.length === 0) {
+        return "";
+    }
+    const argsCode = args.map(({ text }) => text).join(" ");
+    if (ret.length === 0) {
+        return `(${argsCode})`;
+    }
+    const retCode = ret.map(({ value }) => value.toString()).join(" ");
+    return `(${argsCode} -> ${retCode})`;
 }
 
 export const ppAstAsmFunctionDef: Printer<A.AstAsmFunctionDef> = (node) => (ctx) => {
-    const signature = ctx.row(`asm${ppAsmShuffle(node.shuffle)} ${ppAstFunctionSignature(node)}`);
-    const body = ppAsmInstructionsBlock(node.instructions)(ctx);
-    return `${signature} ${body}`;
+    return ctx.concat([
+        ctx.row(`asm${ppAsmShuffle(node.shuffle)} ${ppAstFunctionSignature(node)} `),
+        ppAsmInstructionsBlock(node.instructions)(ctx)
+    ]);
 }
 
-export const ppAstNativeFunction: Printer<A.AstNativeFunctionDecl> = ({ name, nativeName, params, return: retTy, attributes }) => ({ row }) => {
+export const ppAstNativeFunction: Printer<A.AstNativeFunctionDecl> = ({ name, nativeName, params, return: retTy, attributes }) => (ctx) => {
     const argsFormatted = params
-        .map(
-            (arg) =>
-                `${ppAstId(arg.name)}: ${ppAstType(arg.type)}`,
-        )
+        .map(({ name, type }) => `${ppAstId(name)}: ${ppAstType(type)}`)
         .join(", ");
     const returnType = retTy ? `: ${ppAstType(retTy)}` : "";
-    const attrs = attributes.map((attr) => attr.type + " ").join("");
-    const attribute = row(`@name(${ppAstFuncId(nativeName)})\n`);
-    const definition = row(`${attrs}native ${ppAstId(name)}(${argsFormatted})${returnType};`);
-    return `${attribute}${definition}`;
+    const attrs = attributes.map(({ type }) => type + " ").join("");
+    return ctx.block([
+        ctx.row(`@name(${ppAstFuncId(nativeName)})`),
+        ctx.row(`${attrs}native ${ppAstId(name)}(${argsFormatted})${returnType};`),
+    ]);
 }
 
 export const ppAstTrait: Printer<A.AstTrait> = ({ name, traits, attributes, declarations }) => (ctx) => {
     const traitsFormatted = traits.map((t) => ppAstId(t)).join(", ");
-    const attrsRaw = attributes.map((attr) => `@${attr.type}("${attr.name.value}")`).join(" ");
-    const attrsFormatted = ctx.row(attrsRaw ? `${attrsRaw} ` : "");
     const header = traitsFormatted
         ? `trait ${ppAstId(name)} with ${traitsFormatted}`
         : `trait ${ppAstId(name)}`;
-    const start = `${attrsFormatted}${header} {\n`;
-    const bodyFormatted = ctx.tab(() => {
-        return declarations
-            .map((dec, index, array) => {
-                const formattedDec = ppTraitBody(dec)(ctx);
-                const nextDec = array[index + 1];
-                /* eslint-disable @typescript-eslint/no-unnecessary-condition */
-                if (
-                    ((dec.kind === "constant_def" ||
-                        dec.kind === "constant_decl") &&
-                        (nextDec?.kind === "constant_def" ||
-                            nextDec?.kind === "constant_decl")) ||
-                    (dec.kind === "field_decl" &&
-                        nextDec?.kind === "field_decl")
-                ) {
-                    return formattedDec;
-                }
-                /* eslint-enable @typescript-eslint/no-unnecessary-condition */
-                return formattedDec + "\n";
-            })
-            .join("\n");
-    });
-    const end = ctx.row(`}`);
-    return `${start}${bodyFormatted}${end}`;
+    const attrsRaw = attributes.map((attr) => `@${attr.type}("${attr.name.value}")`).join(" ");
+    const attrsFormatted = attrsRaw ? `${attrsRaw} ` : "";
+    return ctx.concat([
+        ctx.row(`${attrsFormatted}${header} `),
+        ctx.braced(intercalate(
+            groupBy(declarations, ({ kind }) => kind === "constant_def" || kind === "constant_decl" ? 1 : kind === "field_decl" ? 2 : NaN)
+                .map((group) => group.map((node) => ppTraitBody(node)(ctx))),
+            ctx.empty,
+        )),
+    ]);
 }
 
 export const ppAstConstant: Printer<A.AstConstantDef> = ({ attributes, initializer, name, type }) => ({ row }) => {
-    const attrsFormatted = attributes.map((attr) => attr.type + " ").join("");
-    const valueFormatted = ` = ${ppAstExpression(initializer)}`;
-    return row(`${attrsFormatted}const ${ppAstId(name)}: ${ppAstType(type)}${valueFormatted};`);
+    const attrsFormatted = attributes.map(({ type }) => type + " ").join("");
+    return row(`${attrsFormatted}const ${ppAstId(name)}: ${ppAstType(type)} = ${ppAstExpression(initializer)};`);
 }
 
-export const ppAstMessage: Printer<A.AstMessageDecl> = ({ name, opcode, fields }) => ({ row, tab }) => {
+export const ppAstMessage: Printer<A.AstMessageDecl> = ({ name, opcode, fields }) => (ctx) => {
     const prefixFormatted = opcode !== null ? `(${A.astNumToString(opcode)})` : "";
-    const start = row(`message${prefixFormatted} ${ppAstId(name)} {\n`);
-    const fieldsFormatted = tab(() => {
-        return fields.map((field) => ppAstFieldDecl(field)).join("\n");
-    });
-    const end = `}`; // row(`}`); // BUG?
-    return `${start}${fieldsFormatted}\n${end}`;
+    // BUG with }
+    return ctx.concat([
+        ctx.row(`message${prefixFormatted} ${ppAstId(name)} `),
+        ctx.braced(fields.map((field) => ppAstFieldDecl(field)(ctx))),
+    ]);
 }
 
 export const ppModuleItem: Printer<A.AstModuleItem> = makeVisitor<A.AstModuleItem>()({
@@ -318,29 +311,30 @@ export const ppModuleItem: Printer<A.AstModuleItem> = makeVisitor<A.AstModuleIte
     "message_decl": ppAstMessage,
 });
 
-export const ppAstFieldDecl: Printer<A.AstFieldDecl> = (field) => ({ row }) => {
-    const typeFormatted = ppAstType(field.type);
-    const initializer = field.initializer
-        ? ` = ${ppAstExpression(field.initializer)}`
+export const ppAstFieldDecl: Printer<A.AstFieldDecl> = ({ type, initializer, as, name }) => ({ row }) => {
+    const fieldName = ppAstId(name);
+    const typeFormatted = ppAstType(type);
+    const asAlias = as ? ` as ${ppAstId(as)}` : "";
+    const initializerCode = initializer
+        ? ` = ${ppAstExpression(initializer)}`
         : "";
-    const asAlias = field.as ? ` as ${ppAstId(field.as)}` : "";
-    return row(`${ppAstId(field.name)}: ${typeFormatted}${asAlias}${initializer};`);
-}
+    return row(`${fieldName}: ${typeFormatted}${asAlias}${initializerCode};`);
+};
 
-export const ppAstReceiver: Printer<A.AstReceiver> = (receive) => (ctx) => {
-    const header = ppAstReceiverHeader(receive.selector);
-    const stmtsFormatted = ppStatementBlock(receive.statements)(ctx);
-    return ctx.row(`${header} ${stmtsFormatted}`);
+export const ppAstReceiver: Printer<A.AstReceiver> = ({ selector, statements }) => (ctx) => {
+    return ctx.concat([
+        ctx.row(`${ppAstReceiverHeader(selector)} `),
+        ppStatementBlock(statements)(ctx),
+    ]);
 }
 
 export const ppAstFunctionDecl: Printer<A.AstFunctionDecl> = (f) => ({ row }) => {
     return row(`${ppAstFunctionSignature(f)};`);
 }
 
-export const ppAstConstDecl: Printer<A.AstConstantDecl> = (constant) => ({ row }) => {
-    const attrsRaw = constant.attributes.map((attr) => attr.type).join(" ");
-    const attrsFormatted = attrsRaw ? `${attrsRaw} ` : "";
-    return row(`${attrsFormatted}const ${ppAstId(constant.name)}: ${ppAstType(constant.type)};`);
+export const ppAstConstDecl: Printer<A.AstConstantDecl> = ({ attributes, name, type }) => ({ row }) => {
+    const attrsFormatted = attributes.map(({ type }) => type + " ").join("");
+    return row(`${attrsFormatted}const ${ppAstId(name)}: ${ppAstType(type)};`);
 }
 
 export const ppTraitBody: Printer<A.AstTraitDeclaration> = makeVisitor<A.AstTraitDeclaration>()({
@@ -353,24 +347,17 @@ export const ppTraitBody: Printer<A.AstTraitDeclaration> = makeVisitor<A.AstTrai
     "constant_decl": ppAstConstDecl,
 });
 
-export const ppAstInitFunction: Printer<A.AstContractInit> = ({ params, statements }) => ({ row, tab }) => {
+export const ppAstInitFunction: Printer<A.AstContractInit> = ({ params, statements }) => (ctx) => {
     const argsFormatted = params
-        .map(
-            (arg) =>
-                `${ppAstId(arg.name)}: ${ppAstType(arg.type)}`,
-        )
+        .map(({ name, type }) => `${ppAstId(name)}: ${ppAstType(type)}`)
         .join(", ");
     if (statements.length === 0) {
-        return row(`init(${argsFormatted}) {}`);
+        return ctx.row(`init(${argsFormatted}) {}`);
     }
-    const start = row(`init(${argsFormatted}) {\n`)
-    const stmtsFormatted = tab(() => {
-        return statements
-            .map((stmt) => ppAstStatement(stmt))
-            .join("\n");
-    });
-    const end = row('}');
-    return `${start}${stmtsFormatted}\n${end}`;
+    return ctx.concat([
+        ctx.row(`init(${argsFormatted}) `),
+        ctx.braced(statements.map((stmt) => ppAstStatement(stmt)(ctx))),
+    ]);
 }
 
 export const ppContractBody: Printer<A.AstContractDeclaration> = makeVisitor<A.AstContractDeclaration>()({
@@ -386,15 +373,11 @@ export const ppAstImport: Printer<A.AstImport> = ({ path }) => ({ row }) => row(
 
 export const ppAstFunctionSignature = ({ name, attributes, return: retTy, params }: Functional): string => {
     const argsFormatted = params
-        .map(
-            (arg) =>
-                `${ppAstId(arg.name)}: ${ppAstType(arg.type)}`,
-        )
+        .map(({ name, type }) => `${ppAstId(name)}: ${ppAstType(type)}`)
         .join(", ");
-    const attrsRaw = attributes
-        .map((attr) => ppAstFunctionAttribute(attr))
-        .join(" ");
-    const attrsFormatted = attrsRaw ? `${attrsRaw} ` : "";
+    const attrsFormatted = attributes
+        .map((attr) => ppAstFunctionAttribute(attr) + " ")
+        .join("");
     const returnType = retTy ? `: ${ppAstType(retTy)}` : "";
     return `${attrsFormatted}fun ${ppAstId(name)}(${argsFormatted})${returnType}`;
 };
@@ -408,13 +391,13 @@ export const ppAstFunctionAttribute = (attr: A.AstFunctionAttribute): string => 
 }
 
 export const ppAstReceiverHeader = makeVisitor<A.AstReceiverKind>()({
-    "internal-simple": (node) => `receive(${ppAstId(node.param.name)}: ${ppAstType(node.param.type)})`,
+    "bounce": ({ param: { name, type } }) => `bounced(${ppAstId(name)}: ${ppAstType(type)})`,
+    "internal-simple": ({ param: { name, type } }) => `receive(${ppAstId(name)}: ${ppAstType(type)})`,
+    "external-simple": ({ param: { name, type } }) => `external(${ppAstId(name)}: ${ppAstType(type)})`,
     "internal-fallback": () => `receive()`,
-    "internal-comment": (node) => `receive("${node.comment.value}")`,
-    "bounce": (node) => `bounced(${ppAstId(node.param.name)}: ${ppAstType(node.param.type)})`,
-    "external-simple": (node) => `external(${ppAstId(node.param.name)}: ${ppAstType(node.param.type)})`,
     "external-fallback": () => `external()`,
-    "external-comment": (node) => `external("${node.comment.value}")`,
+    "internal-comment": ({ comment: { value } }) => `receive("${value}")`,
+    "external-comment": ({ comment: { value } }) => `external("${value}")`,
 });
 
 export const ppAstFuncId = (func: A.AstFuncId): string => func.text;
@@ -424,23 +407,11 @@ export const ppAstFuncId = (func: A.AstFuncId): string => func.text;
 //
 
 export const ppStatementBlock: Printer<A.AstStatement[]> = (stmts) => (ctx) => {
-    const stmtsFormatted = ctx.tab(() => {
-        return stmts
-            .map((stmt) => ppAstStatement(stmt)(ctx))
-            .join("\n");
-    });
-    const end = ctx.row('}');
-    return `{\n${stmtsFormatted}\n${end}`;
-}
+    return ctx.braced(stmts.map((stmt) => ppAstStatement(stmt)(ctx)));
+};
 
 export const ppAsmInstructionsBlock: Printer<A.AstAsmInstruction[]> = (instructions) => (ctx) => {
-    const instructionsFormatted = ctx.tab(() => {
-        return instructions
-            .map((instruction) => ctx.row(instruction))
-            .join("\n");
-    });
-    const end = ctx.row('}');
-    return `{\n${instructionsFormatted}\n${end}`;
+    return ctx.braced(instructions.map((instruction) => ctx.row(instruction)));
 }
 
 export const ppAstStatementLet: Printer<A.AstStatementLet> = ({ type, name, expression }) => ({ row }) => {
@@ -465,55 +436,69 @@ export const ppAstStatementAugmentedAssign: Printer<A.AstStatementAugmentedAssig
 }
 
 export const ppAstCondition: Printer<A.AstCondition> = ({ condition, trueStatements, falseStatements }) => (ctx) => {
-    const conditionCode = ctx.row(`if (${ppAstExpression(condition)}) `);
-    const trueBranch = ppStatementBlock(trueStatements)(ctx);
-    const falseBranch = falseStatements ? ` else ${ppStatementBlock(falseStatements)(ctx)}` : "";
-    return `${conditionCode}${trueBranch}${falseBranch}`;
+    if (falseStatements) {
+        return ctx.concat([
+            ctx.row(`if (${ppAstExpression(condition)}) `),
+            ppStatementBlock(trueStatements)(ctx),
+            ctx.row(" else "),
+            ppStatementBlock(falseStatements)(ctx),
+        ]);
+    } else {
+        return ctx.concat([
+            ctx.row(`if (${ppAstExpression(condition)}) `),
+            ppStatementBlock(trueStatements)(ctx),
+        ]);
+    }
 }
 
 export const ppAstStatementWhile: Printer<A.AstStatementWhile> = ({ condition, statements }) => (ctx) => {
-    const conditionCode = ppAstExpression(condition);
-    const start = ctx.row(`while (${conditionCode})`);
-    const stmts = ppStatementBlock(statements)(ctx);
-    return `${start} ${stmts}`;
+    return ctx.concat([
+        ctx.row(`while (${ppAstExpression(condition)}) `),
+        ppStatementBlock(statements)(ctx),
+    ]);
 }
 
 export const ppAstStatementRepeat: Printer<A.AstStatementRepeat> = ({ iterations, statements }) => (ctx) => {
-    const condition = ppAstExpression(iterations);
-    const start = ctx.row(`repeat (${condition})`);
-    const stmts = ppStatementBlock(statements)(ctx);
-    return `${start} ${stmts}`;
+    return ctx.concat([
+        ctx.row(`repeat (${ppAstExpression(iterations)}) `),
+        ppStatementBlock(statements)(ctx),
+    ]);
 }
 
 export const ppAstStatementUntil: Printer<A.AstStatementUntil> = ({ condition, statements }) => (ctx) => {
-    const conditionCode = ppAstExpression(condition);
-    const start = ctx.row(`do`);
-    const stmts = ppStatementBlock(statements)(ctx);
-    return `${start} ${stmts} until (${conditionCode});`;
+    return ctx.concat([
+        ctx.row(`do `),
+        ppStatementBlock(statements)(ctx),
+        ctx.row(` until (${ppAstExpression(condition)});`),
+    ]);
 }
 
 export const ppAstStatementForEach: Printer<A.AstStatementForEach> = ({ keyName, valueName, map, statements }) => (ctx) => {
-    const header = ctx.row(`foreach (${ppAstId(keyName)}, ${ppAstId(valueName)} in ${ppAstExpression(map)})`);
-    const body = ppStatementBlock(statements)(ctx);
-    return `${header} ${body}`;
+    return ctx.concat([
+        ctx.row(`foreach (${ppAstId(keyName)}, ${ppAstId(valueName)} in ${ppAstExpression(map)}) `),
+        ppStatementBlock(statements)(ctx),
+    ]);
 }
 
 export const ppAstStatementTry: Printer<A.AstStatementTry> = ({ statements }) => (ctx) => {
-    const start = ctx.row(`try`);
-    const body = ppStatementBlock(statements)(ctx);
-    return `${start} ${body}`;
+    return ctx.concat([
+        ctx.row(`try `),
+        ppStatementBlock(statements)(ctx),
+    ]);
 }
 
 export const ppAstStatementTryCatch: Printer<A.AstStatementTryCatch> = ({ statements, catchName, catchStatements }) => (ctx) => {
-    const start = ctx.row(`try`);
-    const tryBody = ppStatementBlock(statements)(ctx);
-    const catchBody = ppStatementBlock(catchStatements)(ctx);
-    return `${start} ${tryBody} catch (${ppAstId(catchName)}) ${catchBody}`;
+    return ctx.concat([
+        ctx.row(`try `),
+        ppStatementBlock(statements)(ctx),
+        ctx.row(` catch (${ppAstId(catchName)}) `),
+        ppStatementBlock(catchStatements)(ctx),
+    ]);
 }
 
 export const ppAstStatementDestruct: Printer<A.AstStatementDestruct> = ({ type, identifiers, expression }) => ({ row }) => {
     const ids: string[] = [];
-    for (const[field, name] of identifiers.values()) {
+    for (const [field, name] of identifiers.values()) {
         const id =
             field.text === name.text
                 ? ppAstId(name)
@@ -539,7 +524,7 @@ export const ppAstStatement: Printer<A.AstStatement> = makeVisitor<A.AstStatemen
     "statement_destruct": ppAstStatementDestruct,
 });
 
-export const exprNode = <T>(exprPrinter: (expr: T) => string): Printer<T> => (node) => () => exprPrinter(node);
+export const exprNode = <T>(exprPrinter: (expr: T) => string): Printer<T> => (node) => ({ row }) => row(exprPrinter(node));
 
 export const ppAstNode: Printer<A.AstNode> = makeVisitor<A.AstNode>()({
     "op_binary": exprNode(ppAstExpression),
@@ -601,4 +586,11 @@ export const ppAstNode: Printer<A.AstNode> = makeVisitor<A.AstNode>()({
  * @param node The AST node to format.
  * @returns A string that represents the formatted AST node.
  */
-export const prettyPrint = (node: A.AstNode): string => ppAstNode(node)(createContext());
+export const prettyPrint = (node: A.AstNode): string => {
+    // Default number of spaces per indentation level is 4
+    return ppAstNode(node)(createContext(4))
+        // Initial level of indentation is 0
+        .map((f) => f(0))
+        // Lines are terminated with \n
+        .join('\n');
+};
