@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+// if there are error here, run `yarn gen`
+
 import { randomAddress } from "../utils/randomAddress";
 import {
     MapTestContract,

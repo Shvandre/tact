@@ -3,7 +3,6 @@ import { throwInternalCompilerError } from "../errors";
 
 /**
  * Convert union to intersection. See https://stackoverflow.com/q/50374908
- * @knipignore
  */
 export type Intersect<T> = (T extends unknown ? (x: T) => 0 : never) extends (
     x: infer R,
@@ -14,13 +13,11 @@ export type Intersect<T> = (T extends unknown ? (x: T) => 0 : never) extends (
 /**
  * Makes types more readable
  * Example: Unwrap<{ a: 1 } & { b: 2 }> = { a: 1, b: 2 }
- * @knipignore
  */
 export type Unwrap<T> = T extends infer R ? { [K in keyof R]: R[K] } : never;
 
 /**
  * Make visitor for literal union
- * @knipignore
  */
 export const makeLiteralVisitor =
     <I, O>(handlers: { [K in keyof I]: () => O }) =>
@@ -45,7 +42,6 @@ type Handlers<I, O> = Unwrap<Intersect<Inputs<I>>> & Outputs<O>;
 
 /**
  * Make visitor for disjoint union (tagged union, discriminated union)
- * @knipignore
  */
 export const makeVisitor =
     <I>() =>
@@ -77,36 +73,38 @@ declare const NoSuchCase: unique symbol;
 interface NoSuchCaseBug<L> extends Array<never> {
     [NoSuchCase]: L;
 }
-type On<V, I extends any[], O> = {
+type On<I extends any[], O> = {
     on: <const DI extends any[]>(
         ...key: I extends Flat<DI> ? DI : NoSuchCaseBug<DI>
     ) => <const DO>(
         handler: (...args: Extract<I, Flat<DI>>) => DO,
-    ) => MV<V, Exclude<I, Flat<DI>>, O | DO>;
+    ) => MV<Exclude<I, Flat<DI>>, O | DO>;
 };
 
 declare const CasesAreNotExhaustive: unique symbol;
 interface NonExhaustiveBug<L> {
     [CasesAreNotExhaustive]: L;
 }
-type End<I, O> = [I] extends [never]
-    ? EndInternal<O>
+type End<I extends any[], O> = [I] extends [never]
+    ? EndInternal<I, O>
     : {
+          otherwise: <const DO>(handle: (...input: I) => DO) => O | DO
           end: NonExhaustiveBug<I>;
       };
-type MV<V, I extends any[], O> = End<I, O> & On<V, I, O>;
+type MV<I extends any[], O> = End<I, O> & On<I, O>;
 
-type OnInternal<V, I extends any[], O> = {
+type OnInternal<I extends any[], O> = {
     on: <const DI extends any[]>(
         ...key: DI
     ) => <const DO>(
         handler: (...args: Extract<I, Flat<DI>>) => DO,
-    ) => MVInternal<V, Exclude<I, Flat<DI>>, O | DO>;
+    ) => MVInternal<Exclude<I, Flat<DI>>, O | DO>;
 };
-type EndInternal<O> = {
+type EndInternal<I extends any[], O> = {
+    otherwise: <const DO>(handle: (...input: I) => DO) => O | DO
     end: () => O;
 };
-type MVInternal<V, I extends any[], O> = EndInternal<O> & OnInternal<V, I, O>;
+type MVInternal<I extends any[], O> = EndInternal<I, O> & OnInternal<I, O>;
 
 const deepMatch = (a: unknown, b: unknown): boolean => {
     if (
@@ -133,13 +131,14 @@ const deepMatch = (a: unknown, b: unknown): boolean => {
 
 export const match = <const I extends any[]>(
     ...args: I
-): MV<I, Flat<I>, never> => {
-    const rec = <V, I extends any[], O>(end: () => O): MVInternal<V, I, O> => ({
+): MV<Flat<I>, never> => {
+    const rec = <I extends any[], O>(end: () => O): MVInternal<I, O> => ({
         end,
+        otherwise: (handler) => handler(...args as unknown as I),
         on:
             <const DI extends any[]>(...match: DI) =>
             <const DO>(handler: (...args: Extract<I, Flat<DI>>) => DO) =>
-                rec<V, Exclude<I, Flat<DI>>, O | DO>(() =>
+                rec<Exclude<I, Flat<DI>>, O | DO>(() =>
                     deepMatch(args, match)
                         ? handler(
                               ...(args as unknown as Extract<I, Flat<DI, []>>),
@@ -147,7 +146,7 @@ export const match = <const I extends any[]>(
                         : end(),
                 ),
     });
-    return rec<I, Flat<I>, never>(() => {
+    return rec<Flat<I>, never>(() => {
         throw new Error("Not exhaustive");
-    }) as MV<I, Flat<I>, never>;
+    }) as MV<Flat<I>, never>;
 };
