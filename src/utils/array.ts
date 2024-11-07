@@ -1,6 +1,6 @@
 export const isUndefined = <T>(t: T | undefined): t is undefined => typeof t === 'undefined';
 
-export const groupBy = <T, U>(items: T[], f: (t: T) => U): T[][] => {
+export const groupBy = <T, U>(items: readonly T[], f: (t: T) => U): readonly (readonly T[])[] => {
     const result: T[][] = [];
     const [head, ...tail] = items;
     if (isUndefined(head)) {
@@ -22,7 +22,7 @@ export const groupBy = <T, U>(items: T[], f: (t: T) => U): T[][] => {
     return result;
 };
 
-export const intercalate = <T>(items: T[][], value: T): T[] => {
+export const intercalate = <T>(items: readonly (readonly T[])[], value: T): readonly T[] => {
     const [head, ...tail] = items;
     if (isUndefined(head)) {
         return [];
